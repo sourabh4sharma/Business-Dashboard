@@ -17,6 +17,7 @@
     </div>
   </div>
   <div class="topbar-right">
+    <span id="busy" class="spinner" hidden></span>
     <span class="live"><span id="liveDot" class="live-dot"></span><span id="lastUpdated" class="muted"></span></span>
     <button id="pauseBtn" class="btn btn-ghost">Pause</button>
     <button id="refreshBtn" class="btn btn-primary">Refresh</button>
@@ -41,6 +42,21 @@
   <!-- ===== Overview ===== -->
   <section id="overviewView" class="view" hidden>
     <div id="kpiRow" class="kpi-row"></div>
+
+    <div id="aiPanel" class="panel ai-panel">
+      <div class="ai-head">
+        <span class="ai-title">✦ Ask about this data</span>
+        <span class="ai-note muted" id="aiNote"></span>
+      </div>
+      <form id="aiForm" class="ai-form">
+        <input id="aiInput" type="text" autocomplete="off"
+               placeholder="e.g. Which POD has the lowest collection %? Which category has the most overdue?">
+        <button class="btn btn-primary" id="aiSend" type="submit">Ask</button>
+      </form>
+      <div id="aiAnswer" class="ai-answer" hidden></div>
+    </div>
+
+    <div id="tableNav" class="table-nav"></div>
 
     <div class="chart-grid">
       <div class="panel">
@@ -73,6 +89,7 @@
   <!-- ===== POD detail ===== -->
   <section id="podView" class="view" hidden>
     <div id="podCards" class="kpi-row"></div>
+    <div id="podSummary" class="pod-panels"></div>
     <div class="toolbar">
       <input id="searchBox" type="text" placeholder="Search customer name…">
       <select id="statusFilter"><option value="">All statuses</option></select>

@@ -259,6 +259,60 @@ select:focus, input[type="text"]:focus {
 .meter-fill.low { background: var(--critical); }
 .meter-val { font-size: 12.5px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
 
+/* ---------- AI panel ---------- */
+.ai-panel { padding: 14px 18px; }
+.ai-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 9px; flex-wrap: wrap; }
+.ai-title { font-size: 13px; font-weight: 600; color: var(--s7); }
+.ai-note { font-size: 11.5px; }
+.ai-form { display: flex; gap: 8px; }
+#aiInput { flex: 1; min-width: 0; }
+.ai-answer {
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ---------- Jump-to chips ---------- */
+.table-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.table-nav-label { font-size: 12px; color: var(--muted); font-weight: 500; }
+.chip {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover { border-color: var(--s1); color: var(--s1); }
+
+/* ---------- POD summary panels ---------- */
+.pod-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+.pod-panels .panel { padding: 16px 18px; }
+.mini-table { width: 100%; font-size: 12.5px; border-collapse: collapse; }
+.mini-table th, .mini-table td { padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+.mini-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.mini-table td { text-align: right; font-variant-numeric: tabular-nums; }
+.mini-table td:first-child, .mini-table th:first-child { text-align: left; font-variant-numeric: normal; }
+.mini-table td:first-child { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.aging-row { display: grid; grid-template-columns: 92px 1fr 90px; align-items: center; gap: 10px; margin-bottom: 9px; }
+.aging-label { font-size: 12px; color: var(--ink-2); }
+.aging-track { height: 8px; border-radius: 5px; background: var(--grid); overflow: hidden; }
+.aging-fill { height: 100%; border-radius: 5px; }
+.aging-val { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+
 /* ---------- Summary tables ---------- */
 .section-stack { display: flex; flex-direction: column; gap: 18px; }
 .summary-scroll { overflow: auto; max-height: 440px; border-radius: var(--radius-sm); }

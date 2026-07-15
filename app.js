@@ -11,6 +11,12 @@ const APPS_SCRIPT_URL =
 const APPS_SCRIPT_KEY = "eFZYQGevyYbeiRxswugbkF7YI4BLAcN3";
 const REFRESH_INTERVAL_MS = 7000;
 
+// Gemini AI (Overview "Ask about this data"). Paste the API key here once
+// you have it. NOTE: this file is public, so the key will be visible in
+// source — restrict it in Google AI Studio to the github.io referrer.
+const GEMINI_API_KEY = "";
+const GEMINI_MODEL = "gemini-2.0-flash";
+
 const SUMMARY_SHEET = "Summary";
 const PODS = [
   { label: "D2C & Auto", sheetName: "D2C & Auto POD" },
@@ -31,6 +37,10 @@ let sortCol = null;
 let sortDir = 1;
 let lastSnapshotByKey = {};
 let lastPodRenderKey = null;
+let summaryRowsCache = null; // last Summary rows, for the AI panel
+let loadSeq = 0; // guards against overlapping/stale loads
+let inFlight = false; // a fetch is currently running
+const rendered = { overview: false, pod: false };
 
 // ---- Number helpers ------------------------------------------------------
 function parseNumber(val) {
@@ -71,6 +81,19 @@ function fmtRupees(r) {
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function nowTime() {
+  return new Date().toLocaleTimeString();
+}
+
+function slug(s) {
+  return "sec-" + String(s || "details").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function setBusy(on) {
+  const b = document.getElementById("busy");
+  if (b) b.hidden = !on;
 }
 
 function findColumnIndex(headerRow, keyword) {
@@ -193,6 +216,7 @@ function findSection(sections, keyword) {
 function renderOverview(rows) {
   document.getElementById("podView").hidden = true;
   document.getElementById("overviewView").hidden = false;
+  summaryRowsCache = rows;
 
   const sections = parseSummarySections(rows);
 
@@ -383,10 +407,30 @@ function renderTargetMeters(sections) {
 
 function renderSummaryTables(sections) {
   const container = document.getElementById("summaryTables");
+  const nav = document.getElementById("tableNav");
   container.innerHTML = "";
+  nav.innerHTML = "";
+
+  const label = document.createElement("span");
+  label.className = "table-nav-label";
+  label.textContent = "Jump to:";
+  nav.appendChild(label);
+
   sections.forEach((s) => {
     if (!s.header && s.rows.length === 0) return;
-    container.appendChild(buildSummaryCard(s));
+    const id = slug(s.title);
+    const card = buildSummaryCard(s);
+    card.id = id;
+    container.appendChild(card);
+
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.textContent = s.title || "Details";
+    chip.addEventListener("click", () => {
+      const el = document.getElementById(id);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    nav.appendChild(chip);
   });
 }
 
@@ -487,6 +531,130 @@ function renderPodCards(rows, columns) {
     .map((c) => `<div class="kpi ${c.accent}"><div class="kpi-label">${c.label}</div><div class="kpi-value" style="font-size:22px">${c.value}</div></div>`)
     .join("");
   return statusCol;
+}
+
+function podFindCol(columns, ...keywords) {
+  for (const kw of keywords) {
+    const c = columns.find((col) => col.toLowerCase().includes(kw.toLowerCase()));
+    if (c) return c;
+  }
+  return null;
+}
+
+const AGING_BUCKETS = [
+  { key: "Under credit", re: /under\s*credit/i, color: "--s1" },
+  { key: "1–30 days", re: /1\s*-\s*30/, color: "--good" },
+  { key: "31–60 days", re: /31\s*-\s*60/, color: "--s4" },
+  { key: "61–90 days", re: /61\s*-\s*90/, color: "--warning" },
+  { key: "91–180 days", re: /91\s*-\s*180/, color: "--serious" },
+  { key: "181–365 days", re: /181\s*-\s*365/, color: "--critical" },
+  { key: "365+ days", re: /more than 365|365\s*\+|>\s*365/i, color: "--critical" },
+];
+
+function miniPanel(title, bodyHtml) {
+  return `<div class="panel"><div class="panel-head"><h3 class="panel-title">${title}</h3></div>${bodyHtml}</div>`;
+}
+
+function renderPodSummary(rows, columns) {
+  const host = document.getElementById("podSummary");
+  const panels = [];
+  const sum = (col) => rows.reduce((a, r) => a + (parseNumber(r[col]) ?? 0), 0);
+
+  const balanceCol = podFindCol(columns, "balance");
+  const statusCol = podFindCol(columns, "collected/not collected", "collected/ not collected");
+  const customerCol = podFindCol(columns, "customer name");
+  const etaMonthCol = columns.find((c) => /eta.*month/i.test(c));
+  const valueCol = columns.find((c) => /^value$/i.test(c.trim())) || null;
+
+  // Aging profile (bar per bucket)
+  const buckets = [];
+  AGING_BUCKETS.forEach((b) => {
+    const col = columns.find((c) => b.re.test(c));
+    if (col) buckets.push({ label: b.key, color: b.color, amount: sum(col) });
+  });
+  if (buckets.length >= 2) {
+    const max = Math.max(1, ...buckets.map((b) => Math.abs(b.amount)));
+    const body = buckets
+      .map((b) => {
+        const w = Math.max(0, (Math.abs(b.amount) / max) * 100);
+        return `<div class="aging-row">
+          <span class="aging-label">${b.label}</span>
+          <span class="aging-track"><span class="aging-fill" style="width:${w.toFixed(1)}%;background:var(${b.color})"></span></span>
+          <span class="aging-val">${fmtRupees(b.amount)}</span>
+        </div>`;
+      })
+      .join("");
+    panels.push(miniPanel("Aging profile", body));
+  }
+
+  // Status breakdown
+  if (statusCol) {
+    const groups = {};
+    rows.forEach((r) => {
+      const k = (r[statusCol] || "").trim() || "—";
+      if (!groups[k]) groups[k] = { count: 0, bal: 0 };
+      groups[k].count++;
+      if (balanceCol) groups[k].bal += parseNumber(r[balanceCol]) ?? 0;
+    });
+    const entries = Object.entries(groups).sort((a, b) => b[1].bal - a[1].bal);
+    const body = entries
+      .map(([k, v]) => `<tr><td>${k}</td><td>${v.count}</td><td>${balanceCol ? fmtRupees(v.bal) : "—"}</td></tr>`)
+      .join("");
+    panels.push(
+      miniPanel(
+        "Status breakdown",
+        `<table class="mini-table"><thead><tr><th>Status</th><th>Invoices</th><th>Balance</th></tr></thead><tbody>${body}</tbody></table>`
+      )
+    );
+  }
+
+  // Expected collections by ETA month
+  if (etaMonthCol) {
+    const groups = {};
+    rows.forEach((r) => {
+      const k = (r[etaMonthCol] || "").trim();
+      if (!k) return;
+      if (!groups[k]) groups[k] = { count: 0, val: 0 };
+      let add = parseNumber(r[valueCol]);
+      if (add === null) add = balanceCol ? parseNumber(r[balanceCol]) ?? 0 : 0;
+      groups[k].count++;
+      groups[k].val += add;
+    });
+    const entries = Object.entries(groups).sort((a, b) => b[1].val - a[1].val).slice(0, 10);
+    if (entries.length) {
+      const body = entries
+        .map(([k, v]) => `<tr><td>${k}</td><td>${v.count}</td><td>${fmtRupees(v.val)}</td></tr>`)
+        .join("");
+      panels.push(
+        miniPanel(
+          "Expected collections by ETA",
+          `<table class="mini-table"><thead><tr><th>ETA month</th><th>Invoices</th><th>Expected</th></tr></thead><tbody>${body}</tbody></table>`
+        )
+      );
+    }
+  }
+
+  // Top debtors by balance
+  if (customerCol && balanceCol) {
+    const byCust = {};
+    rows.forEach((r) => {
+      const k = (r[customerCol] || "").trim();
+      if (!k) return;
+      byCust[k] = (byCust[k] || 0) + (parseNumber(r[balanceCol]) ?? 0);
+    });
+    const top = Object.entries(byCust).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    if (top.length) {
+      const body = top.map(([k, v]) => `<tr><td title="${k}">${k}</td><td>${fmtRupees(v)}</td></tr>`).join("");
+      panels.push(
+        miniPanel(
+          "Top debtors by balance",
+          `<table class="mini-table"><thead><tr><th>Customer</th><th>Balance</th></tr></thead><tbody>${body}</tbody></table>`
+        )
+      );
+    }
+  }
+
+  host.innerHTML = panels.join("");
 }
 
 function cellContent(r, c, statusColName) {
@@ -616,6 +784,7 @@ function renderPod(rows) {
     });
 
   const statusCol = renderPodCards(podRows, podColumns);
+  renderPodSummary(podRows, podColumns);
 
   const statusFilter = document.getElementById("statusFilter");
   const previousSelection = statusFilter.value;
@@ -645,40 +814,59 @@ function currentKey() {
 async function loadCurrent(opts = {}) {
   const background = !!opts.background;
   const key = currentKey();
+  const seq = ++loadSeq;
+  inFlight = true;
   const loadingEl = document.getElementById("loadingMsg");
   const errorEl = document.getElementById("errorMsg");
   const lastUpdatedEl = document.getElementById("lastUpdated");
 
+  // First paint of a view shows the big centered spinner; after that we keep
+  // the current content on screen and only show a small "busy" spinner, so a
+  // refresh or a view/POD switch never blanks the dashboard.
+  const firstPaint = !rendered[currentView];
   if (!background) {
-    document.getElementById("overviewView").hidden = true;
-    document.getElementById("podView").hidden = true;
     errorEl.hidden = true;
-    loadingEl.hidden = false;
+    if (firstPaint) {
+      document.getElementById("overviewView").hidden = true;
+      document.getElementById("podView").hidden = true;
+      loadingEl.hidden = false;
+    } else {
+      setBusy(true);
+    }
   }
 
   try {
     const rows = await fetchTabRows(key);
-    const snapshot = JSON.stringify(rows);
+    if (seq !== loadSeq) return; // a newer load superseded this one
 
+    const snapshot = JSON.stringify(rows);
     if (background && lastSnapshotByKey[key] === snapshot) {
-      lastUpdatedEl.textContent = "Live · checked " + new Date().toLocaleTimeString();
+      lastUpdatedEl.textContent = "Live · checked " + nowTime();
       return;
     }
     lastSnapshotByKey[key] = snapshot;
 
     if (currentView === "overview") renderOverview(rows);
     else renderPod(rows);
+    rendered[currentView] = true;
 
     errorEl.hidden = true;
-    lastUpdatedEl.textContent = "Live · updated " + new Date().toLocaleTimeString();
+    lastUpdatedEl.textContent = "Live · updated " + nowTime();
   } catch (err) {
+    if (seq !== loadSeq) return;
     console.error(err);
     if (!background) {
       errorEl.hidden = false;
       errorEl.textContent = "Couldn't load data.\n\n" + (err && err.message ? err.message : err);
     }
   } finally {
-    if (!background) loadingEl.hidden = true;
+    if (seq === loadSeq) {
+      inFlight = false;
+      if (!background) {
+        loadingEl.hidden = true;
+        setBusy(false);
+      }
+    }
   }
 }
 
@@ -697,7 +885,7 @@ let autoRefreshPaused = false;
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
-    if (!autoRefreshPaused && document.visibilityState === "visible") {
+    if (!autoRefreshPaused && !inFlight && document.visibilityState === "visible") {
       loadCurrent({ background: true });
     }
   }, REFRESH_INTERVAL_MS);
@@ -707,6 +895,64 @@ function setPaused(paused) {
   autoRefreshPaused = paused;
   document.getElementById("pauseBtn").textContent = paused ? "Resume" : "Pause";
   document.getElementById("liveDot").classList.toggle("paused", paused);
+}
+
+// ---- Gemini AI (answers only from the Summary tab) -----------------------
+async function askGemini(question) {
+  const answerEl = document.getElementById("aiAnswer");
+  answerEl.hidden = false;
+  answerEl.textContent = "Thinking…";
+
+  if (!GEMINI_API_KEY) {
+    answerEl.textContent =
+      "AI isn't enabled yet — add your Gemini API key to GEMINI_API_KEY in app.js to turn this on.";
+    return;
+  }
+  if (!summaryRowsCache) {
+    answerEl.textContent = "Summary data hasn't loaded yet — open the Overview first.";
+    return;
+  }
+
+  try {
+    const body = {
+      system_instruction: {
+        parts: [
+          {
+            text:
+              "You are a collections analyst assistant for a debtors dashboard. Answer ONLY using the " +
+              "Summary data provided below. Amounts are in INR Lakhs unless stated otherwise. If the answer " +
+              "is not derivable from the data, say so plainly. Be concise; use short bullets for lists.",
+          },
+        ],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: `Summary data (rows as JSON):\n${JSON.stringify(summaryRowsCache)}\n\nQuestion: ${question}` }],
+        },
+      ],
+    };
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+    const json = await res.json();
+    if (!res.ok) throw new Error((json.error && json.error.message) || "HTTP " + res.status);
+    const parts = json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts;
+    answerEl.textContent = (parts ? parts.map((p) => p.text).join("") : "").trim() || "No answer returned.";
+  } catch (err) {
+    answerEl.textContent = "AI error: " + (err && err.message ? err.message : err);
+  }
+}
+
+function initAi() {
+  const note = document.getElementById("aiNote");
+  if (!GEMINI_API_KEY) note.textContent = "Enable by adding an API key in app.js";
+  document.getElementById("aiForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = document.getElementById("aiInput").value.trim();
+    if (q) askGemini(q);
+  });
 }
 
 // ---- Init ----------------------------------------------------------------
@@ -734,6 +980,7 @@ function init() {
   document.getElementById("searchBox").addEventListener("input", renderPodTable);
   document.getElementById("statusFilter").addEventListener("change", renderPodTable);
 
+  initAi();
   showView("overview");
   startAutoRefresh();
 }
