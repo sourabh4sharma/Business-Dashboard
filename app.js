@@ -26,6 +26,7 @@ let podRows = [];
 let podColumns = [];
 let sortCol = null;
 let sortDir = 1;
+let lastRawByTab = {}; // sheetName -> JSON snapshot, to skip no-op refreshes
 
 // ---- Helpers ---------------------------------------------------------------
 function parseNumber(val) {
@@ -105,8 +106,10 @@ function renderTabNav() {
 
 async function selectTab(i) {
   currentTabIndex = i;
+  sortCol = null;
+  sortDir = 1;
   renderTabNav();
-  await loadCurrentTab();
+  await loadCurrentTab({ background: false });
 }
 
 // ---- Summary tab -----------------------------------------------------------
@@ -135,13 +138,25 @@ function renderSummary(rows) {
   ].filter((s) => s.start !== -1);
 
   const cardsEl = document.getElementById("summaryCards");
-  cardsEl.innerHTML = "";
-  sections.forEach((s) => {
+  let cardEls = cardsEl.querySelectorAll(".card");
+  if (cardEls.length !== sections.length) {
+    cardsEl.innerHTML = "";
+    sections.forEach(() => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = '<div class="label"></div><div class="value"></div>';
+      cardsEl.appendChild(card);
+    });
+    cardEls = cardsEl.querySelectorAll(".card");
+  }
+  sections.forEach((s, i) => {
     const total = parseNumber(data[s.start]);
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = `<div class="label">${s.key} (₹ Lakhs)</div><div class="value ${total < 0 ? "neg" : ""}">${formatNumber(total)}</div>`;
-    cardsEl.appendChild(card);
+    const labelEl = cardEls[i].querySelector(".label");
+    const valueEl = cardEls[i].querySelector(".value");
+    const labelText = `${s.key} (₹ Lakhs)`;
+    if (labelEl.textContent !== labelText) labelEl.textContent = labelText;
+    valueEl.textContent = formatNumber(total);
+    valueEl.className = "value" + (total < 0 ? " neg" : "");
   });
 
   const labels = ["3M+ Overdue", "0-3M Overdue", "Under Credit"];
@@ -152,16 +167,21 @@ function renderSummary(rows) {
   }));
 
   const ctx = document.getElementById("agingChart").getContext("2d");
-  if (window._agingChart) window._agingChart.destroy();
-  window._agingChart = new Chart(ctx, {
-    type: "bar",
-    data: { labels, datasets },
-    options: {
-      responsive: true,
-      plugins: { title: { display: true, text: "Aging buckets by section (₹ Lakhs)" } },
-      scales: { y: { beginAtZero: true } },
-    },
-  });
+  if (window._agingChart) {
+    window._agingChart.data.labels = labels;
+    window._agingChart.data.datasets = datasets;
+    window._agingChart.update();
+  } else {
+    window._agingChart = new Chart(ctx, {
+      type: "bar",
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        plugins: { title: { display: true, text: "Aging buckets by section (₹ Lakhs)" } },
+        scales: { y: { beginAtZero: true } },
+      },
+    });
+  }
 }
 
 // ---- POD tab -----------------------------------------------------------
@@ -185,18 +205,30 @@ function renderPodCards(rows, columns) {
   }
 
   const cardsEl = document.getElementById("podCards");
-  cardsEl.innerHTML = "";
-  cards.forEach((c) => {
-    const el = document.createElement("div");
-    el.className = "card";
-    el.innerHTML = `<div class="label">${c.label}</div><div class="value">${c.value}</div>`;
-    cardsEl.appendChild(el);
+  let cardEls = cardsEl.querySelectorAll(".card");
+  if (cardEls.length !== cards.length) {
+    cardsEl.innerHTML = "";
+    cards.forEach(() => {
+      const el = document.createElement("div");
+      el.className = "card";
+      el.innerHTML = '<div class="label"></div><div class="value"></div>';
+      cardsEl.appendChild(el);
+    });
+    cardEls = cardsEl.querySelectorAll(".card");
+  }
+  cards.forEach((c, i) => {
+    const labelEl = cardEls[i].querySelector(".label");
+    const valueEl = cardEls[i].querySelector(".value");
+    if (labelEl.textContent !== c.label) labelEl.textContent = c.label;
+    valueEl.textContent = c.value;
   });
 
   return statusCol;
 }
 
 function renderPodTable() {
+  const tableWrap = document.querySelector(".table-wrap");
+  const prevScrollTop = tableWrap.scrollTop;
   const searchTerm = document.getElementById("searchBox").value.trim().toLowerCase();
   const statusVal = document.getElementById("statusFilter").value;
   const statusCol = document.getElementById("statusFilter").dataset.col;
@@ -252,6 +284,8 @@ function renderPodTable() {
     });
     tbody.appendChild(tr);
   });
+
+  tableWrap.scrollTop = prevScrollTop;
 }
 
 function renderPod(rows) {
@@ -273,12 +307,10 @@ function renderPod(rows) {
       return obj;
     });
 
-  sortCol = null;
-  sortDir = 1;
-
   const statusCol = renderPodCards(podRows, podColumns);
 
   const statusFilter = document.getElementById("statusFilter");
+  const previousSelection = statusFilter.value;
   statusFilter.innerHTML = '<option value="">All statuses</option>';
   statusFilter.dataset.col = statusCol || "";
   if (statusCol) {
@@ -289,33 +321,51 @@ function renderPod(rows) {
       opt.textContent = v;
       statusFilter.appendChild(opt);
     });
+    if (uniqueVals.includes(previousSelection)) statusFilter.value = previousSelection;
   }
 
   renderPodTable();
 }
 
 // ---- Load / refresh -----------------------------------------------------
-async function loadCurrentTab() {
+// `background: true` = a periodic auto-refresh of the tab already on screen.
+// These must never flash a loading state or tear down the view — only
+// touch the DOM if the underlying data actually changed.
+async function loadCurrentTab(opts = {}) {
+  const background = !!opts.background;
   const tab = TABS[currentTabIndex];
   const loadingEl = document.getElementById("loadingMsg");
   const errorEl = document.getElementById("errorMsg");
-  document.getElementById("summaryView").style.display = "none";
-  document.getElementById("podView").style.display = "none";
-  errorEl.style.display = "none";
-  loadingEl.style.display = "block";
-  loadingEl.textContent = `Loading “${tab.label}”…`;
+  const lastUpdatedEl = document.getElementById("lastUpdated");
+
+  if (!background) {
+    document.getElementById("summaryView").style.display = "none";
+    document.getElementById("podView").style.display = "none";
+    errorEl.style.display = "none";
+    loadingEl.style.display = "block";
+    loadingEl.textContent = `Loading “${tab.label}”…`;
+  }
 
   try {
     const rows = await fetchTabRows(tab.sheetName);
+    const snapshot = JSON.stringify(rows);
+
+    if (background && lastRawByTab[tab.sheetName] === snapshot) {
+      lastUpdatedEl.textContent = "Live — checked " + new Date().toLocaleTimeString() + ", no changes";
+      return;
+    }
+    lastRawByTab[tab.sheetName] = snapshot;
+
     if (tab.type === "summary") renderSummary(rows);
     else renderPod(rows);
-    document.getElementById("lastUpdated").textContent = "Live — last synced " + new Date().toLocaleTimeString();
+    errorEl.style.display = "none";
+    lastUpdatedEl.textContent = "Live — updated " + new Date().toLocaleTimeString();
   } catch (err) {
     console.error(err);
     errorEl.style.display = "block";
     errorEl.textContent = "Couldn't load this tab.\n\n" + (err && err.message ? err.message : err);
   } finally {
-    loadingEl.style.display = "none";
+    if (!background) loadingEl.style.display = "none";
   }
 }
 
@@ -323,14 +373,14 @@ let refreshTimer = null;
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
-    if (document.visibilityState === "visible") loadCurrentTab();
+    if (document.visibilityState === "visible") loadCurrentTab({ background: true });
   }, REFRESH_INTERVAL_MS);
 }
 
-document.getElementById("refreshBtn").addEventListener("click", loadCurrentTab);
+document.getElementById("refreshBtn").addEventListener("click", () => loadCurrentTab({ background: false }));
 document.getElementById("searchBox").addEventListener("input", renderPodTable);
 document.getElementById("statusFilter").addEventListener("change", renderPodTable);
 
 renderTabNav();
-loadCurrentTab();
+loadCurrentTab({ background: false });
 startAutoRefresh();
